@@ -11,18 +11,28 @@ import dotenv from 'dotenv';
 import { CONFIG, log, sanitizePrompt, isSilentMode } from './utils.js';
 import { startLoadingIndicator, stopLoadingIndicator } from './ui.js';
 import chalk from 'chalk';
+import { OpenRouterClient } from './openrouter-client.js';
 
 // Load environment variables
 dotenv.config();
 
-// Configure Anthropic client
-const anthropic = new Anthropic({
-	apiKey: process.env.ANTHROPIC_API_KEY,
-	// Add beta header for 128k token output
-	defaultHeaders: {
-		'anthropic-beta': 'output-128k-2025-02-19'
-	}
-});
+// Configure AI client
+const anthropicKey = process.env.ANTHROPIC_API_KEY;
+const openrouterKey = process.env.OPENROUTER_API_KEY;
+const isOpenRouter = openrouterKey?.startsWith('sk-or-');
+
+const anthropic = isOpenRouter 
+	? new OpenRouterClient({
+		apiKey: openrouterKey,
+		baseURL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+		defaultModel: process.env.MODEL || 'claude-3-7-sonnet-20250219'
+	})
+	: new Anthropic({
+		apiKey: anthropicKey,
+		defaultHeaders: {
+			'anthropic-beta': 'output-128k-2025-02-19'
+		}
+	});
 
 // Lazy-loaded Perplexity client
 let perplexity = null;
@@ -1152,6 +1162,15 @@ async function _handleAnthropicStream(
 
 		return responseText;
 	} catch (error) {
+		// Add OpenRouter-specific error handling
+		const errorMessage = error.message || '';
+		if (errorMessage.includes('OpenRouter API error')) {
+			if (mcpLog) {
+				mcpLog.error(`OpenRouter API error: ${errorMessage}`);
+			}
+			throw new Error(`OpenRouter API error: ${errorMessage}`);
+		}
+
 		// Cleanup on error
 		if (streamingInterval) {
 			clearInterval(streamingInterval);
@@ -1441,21 +1460,31 @@ Return a JSON object with the following structure:
  * @returns {Anthropic} - Configured Anthropic client
  */
 function getConfiguredAnthropicClient(session = null, customEnv = null) {
-	// If we have a session with ANTHROPIC_API_KEY in env, use that
-	const apiKey =
-		session?.env?.ANTHROPIC_API_KEY ||
-		process.env.ANTHROPIC_API_KEY ||
-		customEnv?.ANTHROPIC_API_KEY;
+	// Get API key from session or environment
+	const apiKey = session?.env?.ANTHROPIC_API_KEY || 
+				  process.env.ANTHROPIC_API_KEY || 
+				  customEnv?.ANTHROPIC_API_KEY;
 
 	if (!apiKey) {
-		throw new Error(
-			'ANTHROPIC_API_KEY environment variable is missing. Set it to use AI features.'
-		);
+		throw new Error('ANTHROPIC_API_KEY environment variable is missing. Set it to use AI features.');
 	}
 
+	// Check if it's an OpenRouter API key
+	if (apiKey.startsWith('sk-or-')) {
+		const baseURL = session?.env?.OPENROUTER_BASE_URL || 
+					   process.env.OPENROUTER_BASE_URL || 
+					   'https://openrouter.ai/api/v1';
+		
+		return new OpenRouterClient({
+			apiKey,
+			baseURL,
+			defaultModel: session?.env?.MODEL || CONFIG.model
+		});
+	}
+
+	// Regular Anthropic API key
 	return new Anthropic({
-		apiKey: apiKey,
-		// Add beta header for 128k token output
+		apiKey,
 		defaultHeaders: {
 			'anthropic-beta': 'output-128k-2025-02-19'
 		}
